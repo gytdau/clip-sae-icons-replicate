@@ -7,7 +7,6 @@ import subprocess
 from typing import List, Optional
 from diffusers import KandinskyV22Pipeline, KandinskyV22PriorPipeline
 import torch
-from transformers import CLIPVisionModelWithProjection
 from diffusers.models import UNet2DConditionModel
 import tempfile
 import uuid
@@ -82,12 +81,40 @@ class Predictor(BasePredictor):
         ),
         width: int = Input(
             description="Width of output image",
-            choices=[384, 512, 576, 640, 704, 768, 960, 1024, 1152, 1280, 1536, 1792, 2048],
+            choices=[
+                384,
+                512,
+                576,
+                640,
+                704,
+                768,
+                960,
+                1024,
+                1152,
+                1280,
+                1536,
+                1792,
+                2048,
+            ],
             default=512,
         ),
         height: int = Input(
             description="Height of output image",
-            choices=[384, 512, 576, 640, 704, 768, 960, 1024, 1152, 1280, 1536, 1792, 2048],
+            choices=[
+                384,
+                512,
+                576,
+                640,
+                704,
+                768,
+                960,
+                1024,
+                1152,
+                1280,
+                1536,
+                1792,
+                2048,
+            ],
             default=512,
         ),
         num_inference_steps: int = Input(
@@ -97,8 +124,8 @@ class Predictor(BasePredictor):
             default=12,
         ),
         seed: int = Input(
-            description="Seed for randomness. By default, 42 is used.",
-            default=42,
+            description="Seed for randomness. By default, 1 is used.",
+            default=1,
         ),
     ) -> List[Path]:
         """Run a single prediction on the model"""
@@ -106,21 +133,25 @@ class Predictor(BasePredictor):
         generator = torch.Generator("cuda").manual_seed(seed)
 
         output_paths = []
-        
+
         # Add validation for embeddings
         if not embeddings:
             raise ValueError("No embeddings provided")
-            
+
         # Convert input embedding to tensor with error handling
         try:
-            embeds = torch.tensor(embeddings, device="cuda").reshape(len(embeddings), -1)
+            embeds = torch.tensor(embeddings, device="cuda").reshape(
+                len(embeddings), -1
+            )
         except Exception as e:
             raise ValueError(f"Failed to process embeddings: {str(e)}")
-        
+
         # Validate embedding dimensions
         expected_dim = self.base_embed.shape[-1]  # Get expected embedding dimension
         if embeds.shape[-1] != expected_dim:
-            raise ValueError(f"Embedding dimension mismatch. Expected {expected_dim}, got {embeds.shape[-1]}")
+            raise ValueError(
+                f"Embedding dimension mismatch. Expected {expected_dim}, got {embeds.shape[-1]}"
+            )
 
         # Add base embedding if requested
         if add_base_embedding:
@@ -138,7 +169,9 @@ class Predictor(BasePredictor):
         # Save each generated image
         for i, sample in enumerate(output.images):
             try:
-                output_path = os.path.join(tempfile.gettempdir(), f"generated_{uuid.uuid4()}.webp")
+                output_path = os.path.join(
+                    tempfile.gettempdir(), f"generated_{uuid.uuid4()}.webp"
+                )
                 sample.save(output_path, "WEBP", quality=85)
                 output_paths.append(Path(output_path))
             except Exception as e:
