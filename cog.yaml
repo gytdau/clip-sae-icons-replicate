@@ -5,11 +5,12 @@ build:
   gpu: true
   python_version: "3.10"
   python_packages:
-    - "torch==2.0.1"
-    - "accelerate==0.20.3"
+    - "torch==2.5.1"
+    - "accelerate==0.34.2"
     - "Pillow==10.0.0"
-    - "transformers==4.30.2"
-    - git+https://github.com/ai-forever/diffusers.git
+    - "transformers==4.44.2"
+    - "huggingface_hub==0.25.0"
+    - "diffusers==0.31.0"
   run:
     - curl -o /usr/local/bin/pget -L "https://github.com/replicate/pget/releases/download/v0.6.2/pget_linux_x86_64" && chmod +x /usr/local/bin/pget
 

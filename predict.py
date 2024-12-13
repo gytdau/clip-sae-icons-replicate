@@ -4,16 +4,18 @@
 import os
 import time
 import subprocess
-from typing import List
+from typing import List, Optional
 from diffusers import KandinskyV22Pipeline, KandinskyV22PriorPipeline
 import torch
 from transformers import CLIPVisionModelWithProjection
 from diffusers.models import UNet2DConditionModel
+import tempfile
+import uuid
 
 from cog import BasePredictor, Input, Path
 
 MODEL_CACHE = "weights_cache"
-PRIOR_URL = "https://weights.replicate.delivery/default/kandinsky-2-2/models--kandinsky-community--kandinsky-2-2-prior.tar"
+# PRIOR_URL = "https://weights.replicate.delivery/default/kandinsky-2-2/models--kandinsky-community--kandinsky-2-2-prior.tar"
 DECODER_URL = "https://weights.replicate.delivery/default/kandinsky-2-2/models--kandinsky-community--kandinsky-2-2-decoder.tar"
 
 os.environ["HF_DATASETS_OFFLINE"] = "1"
@@ -38,13 +40,6 @@ class Predictor(BasePredictor):
     def setup(self) -> None:
         """Load the model into memory to make running multiple predictions efficient"""
 
-        # Download the prior model if not available locally
-        prior_path = os.path.join(
-            MODEL_CACHE, "models--kandinsky-community--kandinsky-2-2-prior"
-        )
-        if not os.path.exists(prior_path):
-            download_weights(PRIOR_URL, prior_path)
-
         # Download the decoder model if not available locally
         decoder_path = os.path.join(
             MODEL_CACHE, "models--kandinsky-community--kandinsky-2-2-decoder"
@@ -54,19 +49,6 @@ class Predictor(BasePredictor):
 
         device = torch.device("cuda:0")
 
-        self.negative_prior_prompt = "lowres, text, error, cropped, worst quality, low quality, jpeg artifacts, ugly, duplicate, morbid, mutilated, out of frame, extra fingers, mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, blurry, dehydrated, bad anatomy, bad proportions, extra limbs, cloned face, disfigured, gross proportions, malformed limbs, missing arms, missing legs, extra arms, extra legs, fused fingers, too many fingers, long neck, username, watermark, signature"
-
-        image_encoder = (
-            CLIPVisionModelWithProjection.from_pretrained(
-                "kandinsky-community/kandinsky-2-2-prior",
-                torch_dtype=torch.float16,
-                subfolder="image_encoder",
-                cache_dir=MODEL_CACHE,
-                local_files_only=True,
-            )
-            .half()
-            .to(device)
-        )
         unet = (
             UNet2DConditionModel.from_pretrained(
                 "kandinsky-community/kandinsky-2-2-decoder",
@@ -78,13 +60,6 @@ class Predictor(BasePredictor):
             .half()
             .to(device)
         )
-        self.prior = KandinskyV22PriorPipeline.from_pretrained(
-            "kandinsky-community/kandinsky-2-2-prior",
-            image_encoder=image_encoder,
-            torch_dtype=torch.float16,
-            cache_dir=MODEL_CACHE,
-            local_files_only=True,
-        ).to(device)
         self.decoder = KandinskyV22Pipeline.from_pretrained(
             "kandinsky-community/kandinsky-2-2-decoder",
             unet=unet,
@@ -93,109 +68,81 @@ class Predictor(BasePredictor):
             local_files_only=True,
         ).to(device)
 
+        self.base_embed = torch.load("base_embeds.pt")[0].to(device)
+        self.zero_embed = torch.load("zero_embed.pt").to(device)
+
     def predict(
         self,
-        prompt: str = Input(
-            description="Input prompt",
-            default="A moss covered astronaut with a black background",
+        embeddings: List[List[float]] = Input(
+            description="Input embeddings, one per icon to generate. Each embedding should be a list of floats. Note that specifying multiple embeddings only guarantees deterministic behavior for the first embedding.",
         ),
-        negative_prompt: str = Input(
-            description="Specify things to not see in the output",
-            default=None,
+        add_base_embedding: bool = Input(
+            description="Whether to add the base embedding to the input embedding",
+            default=True,
         ),
         width: int = Input(
-            description="Width of output image. Lower the setting if hits memory limits.",
-            choices=[
-                384,
-                512,
-                576,
-                640,
-                704,
-                768,
-                960,
-                1024,
-                1152,
-                1280,
-                1536,
-                1792,
-                2048,
-            ],
+            description="Width of output image",
+            choices=[384, 512, 576, 640, 704, 768, 960, 1024, 1152, 1280, 1536, 1792, 2048],
             default=512,
         ),
         height: int = Input(
-            description="Height of output image. Lower the setting if hits memory limits.",
-            choices=[
-                384,
-                512,
-                576,
-                640,
-                704,
-                768,
-                960,
-                1024,
-                1152,
-                1280,
-                1536,
-                1792,
-                2048,
-            ],
+            description="Height of output image",
+            choices=[384, 512, 576, 640, 704, 768, 960, 1024, 1152, 1280, 1536, 1792, 2048],
             default=512,
         ),
         num_inference_steps: int = Input(
-            description="Number of denoising steps", ge=1, le=500, default=75
-        ),
-        num_inference_steps_prior: int = Input(
-            description="Number of denoising steps for priors", ge=1, le=500, default=25
-        ),
-        num_outputs: int = Input(
-            description="Number of images to output.",
+            description="Number of denoising steps",
             ge=1,
-            le=4,
-            default=1,
+            le=500,
+            default=12,
         ),
         seed: int = Input(
-            description="Random seed. Leave blank to randomize the seed", default=None
-        ),
-        output_format: str = Input(
-            description="Output image format",
-            choices=["webp", "jpeg", "png"],
-            default="webp",
+            description="Seed for randomness. By default, 42 is used.",
+            default=42,
         ),
     ) -> List[Path]:
         """Run a single prediction on the model"""
-        if seed is None:
-            seed = int.from_bytes(os.urandom(2), "big")
         print(f"Using seed: {seed}")
-        torch.manual_seed(seed)
+        generator = torch.Generator("cuda").manual_seed(seed)
 
-        if negative_prompt is not None:
-            negative_prior_prompt = negative_prompt + self.negative_prior_prompt
-        else:
-            negative_prior_prompt = self.negative_prior_prompt
+        output_paths = []
+        
+        # Add validation for embeddings
+        if not embeddings:
+            raise ValueError("No embeddings provided")
+            
+        # Convert input embedding to tensor with error handling
+        try:
+            embeds = torch.tensor(embeddings, device="cuda").reshape(len(embeddings), -1)
+        except Exception as e:
+            raise ValueError(f"Failed to process embeddings: {str(e)}")
+        
+        # Validate embedding dimensions
+        expected_dim = self.base_embed.shape[-1]  # Get expected embedding dimension
+        if embeds.shape[-1] != expected_dim:
+            raise ValueError(f"Embedding dimension mismatch. Expected {expected_dim}, got {embeds.shape[-1]}")
 
-        img_emb = self.prior(
-            prompt=prompt,
-            num_inference_steps=num_inference_steps_prior,
-            num_images_per_prompt=num_outputs,
-        )
+        # Add base embedding if requested
+        if add_base_embedding:
+            embeds = embeds + self.base_embed
 
-        negative_emb = self.prior(
-            prompt=negative_prior_prompt,
-            num_inference_steps=num_inference_steps_prior,
-            num_images_per_prompt=num_outputs,
-        )
         output = self.decoder(
-            image_embeds=img_emb.image_embeds,
-            negative_image_embeds=negative_emb.image_embeds,
+            image_embeds=embeds,
+            negative_image_embeds=[self.zero_embed] * len(embeds),
             num_inference_steps=num_inference_steps,
             height=height,
             width=width,
+            generator=generator,
         )
 
-        output_paths = []
+        # Save each generated image
         for i, sample in enumerate(output.images):
-            output_path = f"/tmp/out-{i}.{output_format}"
-            sample.save(output_path)
-            output_paths.append(Path(output_path))
+            try:
+                output_path = os.path.join(tempfile.gettempdir(), f"generated_{uuid.uuid4()}.webp")
+                sample.save(output_path, "WEBP", quality=85)
+                output_paths.append(Path(output_path))
+            except Exception as e:
+                print(f"Failed to save image {i}: {str(e)}")
+                continue
 
         return output_paths
